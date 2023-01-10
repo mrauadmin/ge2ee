@@ -3,6 +3,7 @@ package cryptish
 import (
 	"crypto/aes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -55,16 +56,17 @@ func Ge2ee(h http.Handler) http.Handler {
 		//
 		//Presence of all indicates that the sender wants to start ECDH with us
 		if len(kx) != 0 && len(pk) != 0 && len(sig) != 0 {
-			fmt.Println("Started ECDH...")
-
 			//TODO
 			//Make this a oneliner, maybe even wihtout defining the msg var
-			msg := kx[:0]
+			msg := kx[:]
 			msg = append(msg[:], pk[:]...)
+			s := sha256.New()
+			s.Write(msg)
 
 			//We verify if the message actualy comes from the actual owner
 			//of the public key
-			if ed519.Verify(pk, msg, sig) {
+			if ed519.Verify(pk, s.Sum(nil), sig) {
+				fmt.Println("Started ECDH...")
 				//START ECDH
 
 				//roll a random 32bit number and save it in memory
@@ -77,6 +79,16 @@ func Ge2ee(h http.Handler) http.Handler {
 					fmt.Println(err)
 				}
 
+				//generate public key off a X25519 curve
+				//
+				//K_A = X25519(a, 9)
+				//var Basepoint is the "9" stated in RFC7748
+
+				K_A, err := c519.X25519(randb32, c519.Basepoint)
+				if err != nil {
+					fmt.Println(err)
+				}
+
 				//generate a shared secret from provided data
 				//
 				//secret = c519.X25519(a, K_A)
@@ -85,22 +97,10 @@ func Ge2ee(h http.Handler) http.Handler {
 				if err != nil {
 					fmt.Println(err)
 				}
-				fmt.Println(string(secret))
 
 				//TODO
 				//add security checks, like checking if provided public key is on the curve
 				//and if it is all zeros etc.
-
-				//generate public key off a X25519 curve
-				//
-				//K_A = X25519(a, 9)
-
-				//var Basepoint is the "9"
-
-				K_A, err := c519.X25519(randb32, c519.Basepoint)
-				if err != nil {
-					fmt.Println(err)
-				}
 
 				//add valus to the vault
 				vault[r.Header.Get("PK")] = secret
@@ -121,24 +121,31 @@ func Ge2ee(h http.Handler) http.Handler {
 		} else if len(kx) == 0 && len(pk) != 0 && len(sig) != 0 {
 			fmt.Println("Post ECDH")
 
-			var body []byte
-			r.Body.Read(body)
-			msg := pk[:0]
-			msg = append(msg[:], body[:]...)
+			msg, _ := base64.StdEncoding.DecodeString(r.Header.Get("MSG"))
 
-			if ed519.Verify(pk, msg, sig) {
+			signed := pk[:]
+			signed = append(signed[:], msg[:]...)
+			s2 := sha256.New()
+			s2.Write(signed)
+
+			fmt.Println(ed519.Verify(pk, s2.Sum(nil), sig))
+
+			//Verfiy doesnt seem to work at all for some reason even when bytes are the same
+			//and when everything is correct
+			if ed519.Verify(pk, s2.Sum(nil), sig) {
 				fmt.Println("Checked the signature, it cool")
 				if secret, found := vault[r.Header.Get("PK")]; found {
+					fmt.Println(r.Header.Get("MSG"))
 					//TODO
 					//get MSG from body, body of the request is the encyrpted msg
 					//this is just a placeholder for testing
 					b, _ := base64.StdEncoding.DecodeString(r.Header.Get("MSG"))
+
 					fmt.Println(string(DecryptAES(secret, b)))
 				} else {
 					w.WriteHeader(http.StatusBadRequest)
 				}
 			}
-			w.WriteHeader(http.StatusBadRequest)
 		}
 
 		h.ServeHTTP(w, r)
