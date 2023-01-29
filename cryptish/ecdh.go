@@ -1,4 +1,4 @@
-package cryptish
+package ge2ee
 
 import (
 	"bytes"
@@ -10,14 +10,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	ed519 "crypto/ed25519"
 
 	c519 "golang.org/x/crypto/curve25519"
 )
-
-//TODO
-//Split this to multiple functions for convinience
 
 //Twisted Edwards to Montgomery:
 //https://stackoverflow.com/questions/62586488/how-do-i-sign-a-curve25519-key-in-golang
@@ -26,15 +24,24 @@ import (
 //TODO
 //flush vault of old secrets
 
-//TODO
-//encryption of outgoing messages
-
 // "string" is the public key encoded in base64,
 // "[]byte" is the secret of a client connected to the public key
-var vault = make(map[string][]byte)
+
+type settings struct {
+	flushtime int64
+	maxconn   int
+}
+
+type loot struct {
+	time   int64
+	secret []byte
+}
+
+var vault = make(map[string]loot)
 
 var pub_key_device ed519.PublicKey
 var priv_key_device ed519.PrivateKey
+var err error
 
 // Ge2ee takes one argument, a http.Handler and returns a http.Handler.
 // It handles the authentication, encryption and decryption of every request.
@@ -43,12 +50,14 @@ func Ge2ee(h http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 
 		if len(pub_key_device) == 0 && len(priv_key_device) == 0 {
-			var err error
+
+			//TODO
+			//implement settings declaration
+
 			pub_key_device, priv_key_device, err = ed519.GenerateKey(rand.Reader)
 			if err != nil {
 				fmt.Println(err)
 			}
-			fmt.Println("Generated keys")
 		}
 
 		//shared public key, used for the ECDH
@@ -58,21 +67,18 @@ func Ge2ee(h http.HandlerFunc) http.HandlerFunc {
 		//signature of both of these values connected together
 		sig, _ := base64.StdEncoding.DecodeString(r.Header.Get("SIG"))
 
-		//TODO
-		//Send KX in header and the appropriate keys when
-		//signature of a client is not present in the vault
-
 		//Check if kx_b64, pk_b64 and sig_b64 are present
-		//
 		//Presence of all, indicates that the sender wants to start ECDH with us
 		if len(kx) != 0 && len(pk) != 0 && len(sig) != 0 {
 			//We verify if the message actualy comes from the actual owner
 			//of the public key
 			if ed519.Verify(pk, appendnhash(pk, kx), sig) {
 				e2ee(w, r, kx)
-				fmt.Println("shared keys")
 				h.ServeHTTP(w, r)
-				fmt.Println("run after, ")
+
+				//the passed handler gets executed here
+				//after that we need to encrypt the body etc.
+
 			} else {
 				w.WriteHeader(http.StatusBadRequest)
 			}
@@ -87,15 +93,18 @@ func Ge2ee(h http.HandlerFunc) http.HandlerFunc {
 			a, _ = base64.StdEncoding.DecodeString(string(c))
 
 			if ed519.Verify(pk, appendnhash(pk, a), sig) {
-				if secret, found := vault[r.Header.Get("PK")]; found {
-					decmsg, err := decryptAES(secret, a)
+				if entry, found := vault[r.Header.Get("PK")]; found {
+					//TODO
+					//replace 5000 with settings.flushtime
+					if entry.time <= time.Now().Unix()-5000 {
+						w.WriteHeader(http.StatusGatewayTimeout)
+					}
+					decmsg, err := decryptAES(entry.secret, a)
 					if err != nil {
 						w.WriteHeader(http.StatusBadRequest)
 					}
 					r.Body = io.NopCloser(bytes.NewReader(decmsg))
-					fmt.Println(string(decmsg))
 					h.ServeHTTP(w, r)
-					fmt.Println("run after, ")
 				} else {
 					w.WriteHeader(http.StatusBadRequest)
 				}
@@ -106,6 +115,22 @@ func Ge2ee(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// Encrypt the body AFTER executing the handler.
+func EncryptBody(w http.ResponseWriter, r *http.Request, ct []byte) ([]byte, error) {
+	if secret, found := vault[r.Header.Get("PK")]; found {
+		encmsg, err := encryptAES(secret.secret, ct)
+		if err != nil {
+			return nil, errors.New("body is empty, encryption failed")
+		}
+		w.Header().Add("PK", base64.StdEncoding.EncodeToString(pub_key_device))
+		w.Header().Add("SIG", base64.StdEncoding.EncodeToString(ed519.Sign(priv_key_device, appendnhash(pub_key_device, encmsg))))
+		return encmsg, nil
+	}
+
+	return nil, errors.New("PK not")
+}
+
+// e2ee generates the secret based of of the data from the request and inserts into the vault.
 func e2ee(w http.ResponseWriter, r *http.Request, kx []byte) {
 	//roll a random 32bit number and save it in memory
 	//
@@ -141,7 +166,15 @@ func e2ee(w http.ResponseWriter, r *http.Request, kx []byte) {
 	//and if it is all zeros etc.
 
 	//add values to the vault
-	vault[r.Header.Get("PK")] = secret
+	if entry, ok := vault[r.Header.Get("PK")]; ok {
+
+		// Then we modify the copy
+		entry.secret = secret
+		entry.time = time.Now().Unix()
+
+		// Then we reassign map entry
+		vault[r.Header.Get("PK")] = entry
+	}
 
 	//send the response
 	w.Header().Add("KX", base64.StdEncoding.EncodeToString(KX))
@@ -149,6 +182,9 @@ func e2ee(w http.ResponseWriter, r *http.Request, kx []byte) {
 	w.Header().Add("SIG", base64.StdEncoding.EncodeToString(ed519.Sign(priv_key_device, appendnhash(pub_key_device, KX))))
 }
 
+// Decrypt []byte with provided key using AES decryption.
+// decryptAES splits the provided encrypted byte array into blocks with the length of the key
+// and then decrypts the blocks with the provided key.
 func decryptAES(key []byte, ct []byte) ([]byte, error) {
 	if len(ct) == 0 {
 		return nil, errors.New("body is empty, decryption failed")
@@ -167,24 +203,34 @@ func decryptAES(key []byte, ct []byte) ([]byte, error) {
 	return out[:len(out)-padLen], nil
 }
 
-func encryptAES(key []byte, plaintext string) []byte {
+// Encrypt []byte with provided key using AES enryption.
+// encryptAES splits the provided byte array into blocks with the length of the key
+// and then encrypts the blocks with the provided key.
+func encryptAES(key []byte, ct []byte) ([]byte, error) {
+	if len(ct) == 0 {
+		return nil, errors.New("body is empty, encryption failed")
+	}
 	c, err := aes.NewCipher(key)
 	if err != nil {
 		fmt.Println(err)
 	}
-
-	plaintextBytes := []byte(plaintext)
+	ctBytes := []byte(ct)
 	blockSize := c.BlockSize()
-	padding := blockSize - (len(plaintextBytes) % blockSize)
+	padding := blockSize - (len(ctBytes) % blockSize)
 	padtext := bytes.Repeat([]byte{byte(padding)}, padding)
-	plaintextBytes = append(plaintextBytes, padtext...)
+	ctBytes = append(ctBytes, padtext...)
 
-	out := make([]byte, len(plaintext))
-	c.Encrypt(out, plaintextBytes)
-	return out
+	buff := make([]byte, blockSize)
+	var out []byte
+	for i := 0; i < (len(ctBytes) / blockSize); i++ {
+		c.Encrypt(buff, ctBytes[i*blockSize:])
+		out = append(out, buff...)
+	}
+	return out, nil
 }
 
-// Concatenate the public key (pk) and message (msg). Returns a sha256 hash (in []byte) of this concatenation.
+// Concatenate the public key (pk) and message (msg).
+// Returns a sha256 hash (in []byte) of this concatenation.
 func appendnhash(pk []byte, msg []byte) []byte {
 	p := pk[:]
 	p = append(p[:], msg[:]...)

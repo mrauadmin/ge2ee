@@ -1,4 +1,4 @@
-module ge2ee/cryptish
+module ge2ee
 
 go 1.19
 
