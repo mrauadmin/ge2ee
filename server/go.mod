@@ -1,4 +1,4 @@
-module ge2ee
+module ge2ee/server
 
 go 1.19
 

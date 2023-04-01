@@ -45,7 +45,7 @@ var err error
 
 // Ge2ee takes one argument, a http.Handler and returns a http.Handler.
 // It handles the authentication, encryption and decryption of every request.
-func Ge2ee(h http.HandlerFunc) http.HandlerFunc {
+func Ge2eeHandle(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
