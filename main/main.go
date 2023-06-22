@@ -1,9 +1,10 @@
-package main
+package ge2ee
 
 import (
-	ch "ge2ee"
 	"net/http"
 	"strings"
+
+	ch "ge2ee"
 
 	"github.com/go-chi/chi/v5"
 )
